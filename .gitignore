@@ -1,5 +1,68 @@
+# --- Secrets -----------------------------------------------------------
+# .env holds QA_PASSWORD, GROQ_API_KEY and the internal QA host URLs.
+# Never commit it. Share .env.example instead.
 .env
+.env.*
+!.env.example
+
+# --- Python ------------------------------------------------------------
 __pycache__/
-*.pyc
-output/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+venv/
+.venv/
+env/
+ENV/
+
+# --- Test / run artifacts ----------------------------------------------
+# los_automation/artifacts/ is ~567 MB of per-case screenshots, traces and
+# HTML dumps written on every run. Regenerated, never reviewed in a diff.
 los_automation/artifacts/
+los_automation/**/artifacts/
+
+# --- Generated pipeline output -----------------------------------------
+# Rebuilt by the crawler / FSD pipeline (knowledge.db, site_map.json,
+# fsd_*.json). Regenerable, so kept out of history.
+output/
+*.db
+*.sqlite
+*.sqlite3
+probe_observations.json
+
+# --- Playwright / Selenium ---------------------------------------------
+playwright-report/
+test-results/
+.playwright/
+*.webm
+*.zip
+geckodriver.log
+chromedriver.log
+
+# --- Logs & temp -------------------------------------------------------
+*.log
+logs/
+tmp/
+temp/
+.cache/
+
+# --- Tooling / IDE -----------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- OS ----------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store

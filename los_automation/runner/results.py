@@ -1,24 +1,29 @@
 """
 Result types.
 
-A check has two outcomes and only two:
+A check has three outcomes:
 
-  PASS  the app did what it should — the screen worked, or a value that was
-        entered came back unchanged
-  FAIL  the app did something different  -> a real finding, worth reporting
+  PASS     the app did what it should — the screen worked, or a value that was
+           entered came back unchanged
+  FAIL     the app did something different  -> a real finding, worth reporting
+  BLOCKED  we could not tell                -> environment or missing test data
 
-There is deliberately no third check status. "Could not check" used to be one,
-and it grew to carry everything from a dry run to a field left blank on purpose
-until a report could be a third unreadable amber and still mean nothing was
-wrong. Anything that is not an assertion about the application is not a check:
-it is either an OBSERVATION (see RunResult.notes) or, when the whole run could
-not proceed, an ERROR.
+The third state is the most important design decision in the portal. A
+non-technical operator must never be shown FAIL for something that is not a
+product defect: if login times out, the environment is unreachable, or the case
+this run was pointed at is simply not in the grid, the answer is BLOCKED.
+Collapsing those into FAIL is how a tool like this loses credibility in its
+first week.
 
-ERROR is a RUN-level state, never a check status. Login timing out, an
-unreachable environment or a host that is not approved for data entry are not
-product defects, and showing them as FAIL is how a tool like this loses
-credibility in its first week. A run that errors reports no verdict on the
-application at all.
+BLOCKED is not a dumping ground, though, and that is the other half of the
+lesson. Anything that is merely worth SAYING — a field this deployment does not
+configure, a tab deliberately left alone, a dry run that saved nothing — is an
+OBSERVATION (see RunResult.notes), not a check. Observations are never counted
+and never change a run's outcome, so a report cannot end up a wall of amber
+that means nothing is wrong.
+
+ERROR is kept as an alias of BLOCKED so flows and targets written against the
+two-state vocabulary keep working.
 """
 from __future__ import annotations
 
@@ -28,10 +33,14 @@ from typing import Any, Optional
 
 PASS = "PASS"
 FAIL = "FAIL"
-# Run-level only. Never assign this to Check.status.
-ERROR = "ERROR"
+BLOCKED = "BLOCKED"
+# Back-compat alias. The qa-automation branch used ERROR as a run-level state
+# and had no BLOCKED check status; the merged vocabulary is BLOCKED throughout,
+# and code that still says R.ERROR lands in the same bucket rather than
+# inventing a fourth word for the same thing.
+ERROR = BLOCKED
 
-ORDER = {FAIL: 0, PASS: 1}
+ORDER = {FAIL: 0, BLOCKED: 1, PASS: 2}
 
 
 @dataclass
@@ -72,6 +81,10 @@ def failed(name: str, expected: str = "", actual: str = "", detail: str = "", **
                  detail=detail, **kw)
 
 
+def blocked(name: str, detail: str, **kw) -> Check:
+    return Check(name=name, status=BLOCKED, detail=detail, **kw)
+
+
 @dataclass
 class Note:
     """
@@ -102,13 +115,9 @@ def observation(subject: str, detail: str, evidence: Optional[list] = None,
     """
     An observation that reads like the check it replaces.
 
-    Anything this suite cannot make an assertion about is not a check. A dry
-    run, a tab deliberately left alone, a screen whose dialog offered nothing
-    to associate — each of those used to be recorded as a third "could not
-    check" status, and a report could be all amber while saying nothing was
-    wrong. They are observations, and `subject` keeps the thing being observed
-    at the front of the sentence so the note still reads as a statement about
-    a named screen.
+    `subject` keeps the thing being observed at the front of the sentence, so
+    the note still reads as a statement about a named screen rather than a
+    stray sentence in a list.
     """
     text = f"{subject}: {detail}" if detail else subject
     return Note(text=text, screen=screen, evidence=list(evidence or []))
@@ -138,18 +147,27 @@ class RunResult:
     artifacts_dir: str = ""
     created_records: list[str] = field(default_factory=list)
     # Why the run could not proceed at all — an environment problem, not a
-    # finding about the application. Set this and the run reports ERROR and no
-    # verdict.
-    error_reason: str = ""
+    # finding about the application. Set this and the run reports BLOCKED and
+    # no verdict.
+    blocked_reason: str = ""
     # Observations: worth reading, never a verdict. See Note.
     notes: list[Note] = field(default_factory=list)
     # The record this run verified. Pinned per run so two runs are comparable.
     case_id: str = ""
 
+    # Back-compat alias for the branch that called this `error_reason`.
+    @property
+    def error_reason(self) -> str:
+        return self.blocked_reason
+
+    @error_reason.setter
+    def error_reason(self, value: str) -> None:
+        self.blocked_reason = value
+
     # ---- summary -------------------------------------------------------
     @property
     def counts(self) -> dict[str, int]:
-        out = {PASS: 0, FAIL: 0}
+        out = {PASS: 0, FAIL: 0, BLOCKED: 0}
         for c in self.checks:
             out[c.status] = out.get(c.status, 0) + 1
         return out
@@ -159,23 +177,23 @@ class RunResult:
         """
         PASS only if something was actually checked and nothing failed.
 
-        A run that verified nothing is an ERROR, not a pass: there is no
+        A run that verified nothing is BLOCKED, not a pass: there is no
         evidence either way, and the one thing this suite must never do is let
         silence read as success.
         """
-        if self.error_reason:
-            return ERROR
+        if self.blocked_reason:
+            return BLOCKED
         counts = self.counts
         if counts[FAIL]:
             return FAIL
         if counts[PASS] == 0:
-            return ERROR            # nothing verified is not a pass
+            return BLOCKED          # nothing verified is not a pass
         return PASS
 
     @property
     def headline(self) -> str:
         c = self.counts
-        out = f"{c[PASS]} passed / {c[FAIL]} failed"
+        out = f"{c[PASS]} passed / {c[FAIL]} failed / {c[BLOCKED]} blocked"
         if self.notes:
             out += f" / {len(self.notes)} observation(s)"
         return out
@@ -196,18 +214,20 @@ class RunResult:
     def screen_summary(self) -> list[dict]:
         rows = []
         for screen, checks in self.by_screen().items():
-            counts = {PASS: 0, FAIL: 0}
+            counts = {PASS: 0, FAIL: 0, BLOCKED: 0}
             for c in checks:
                 counts[c.status] = counts.get(c.status, 0) + 1
             rows.append({"screen": screen, "passed": counts[PASS],
-                         "failed": counts[FAIL],
-                         "status": FAIL if counts[FAIL] else PASS})
+                         "failed": counts[FAIL], "blocked": counts[BLOCKED],
+                         "status": FAIL if counts[FAIL] else
+                                   (PASS if counts[PASS] else BLOCKED)})
         return rows
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["overall"] = self.overall
         d["headline"] = self.headline
+        d["error_reason"] = self.blocked_reason
         return d
 
     def to_json(self, indent: int = 2) -> str:

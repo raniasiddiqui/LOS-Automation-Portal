@@ -247,9 +247,16 @@ class NavigationError(Exception):
     reported as one; it makes the run an ERROR instead.
     """
 
-    def __init__(self, message: str, environmental: bool = False):
+    def __init__(self, message: str, environmental: bool = False,
+                 blocked: Optional[bool] = None):
         super().__init__(message)
-        self.environmental = environmental
+        # `blocked` is the merged vocabulary's name for the same thing; the
+        # qa-automation branch raised these with `environmental=`, the
+        # qa-automation-2 branch with `blocked=`. Either keyword sets both
+        # attributes so callers written against either name keep working.
+        flag = environmental if blocked is None else blocked
+        self.environmental = flag
+        self.blocked = flag
 
 
 class Session:
@@ -491,7 +498,7 @@ class Session:
                 "There are no records in this grid to open, so the screens below "
                 "it cannot be reached. This usually means the environment has no "
                 "test data rather than a defect.",
-                environmental=step.missing_is_environmental)
+                environmental=step.missing_is_blocked)
         row = openers[0]
         before = urlparse(self.page.url).path.rstrip("/")
         self.recorder.clear()
@@ -564,7 +571,7 @@ class Session:
         raise NavigationError(
             f"Record {wanted} was not found here. Looked at {scanned} row(s) "
             f"across {page_no} page(s).{grid}{tail}",
-            environmental=step.missing_is_environmental)
+            environmental=step.missing_is_blocked)
 
     def _next_grid_page(self) -> bool:
         """

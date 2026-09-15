@@ -42,8 +42,16 @@ class NavStep:
     satisfied_if_active: bool = False
     # Is a missing hop the app's fault or the environment's? A missing menu entry
     # is a regression (FAIL); a record that is not in the grid is missing test
-    # data, which makes the run an ERROR rather than a finding.
-    missing_is_environmental: bool = False
+    # data (BLOCKED).
+    missing_is_blocked: bool = False
+
+    # Back-compat alias. The qa-automation branch called this
+    # `missing_is_environmental`; the vocabulary settled on BLOCKED when the
+    # two branches merged. Both spellings are accepted so targets authored
+    # against either name keep working.
+    @property
+    def missing_is_environmental(self) -> bool:
+        return self.missing_is_blocked
 
     def describe(self) -> str:
         if self.kind == MENU:
@@ -250,7 +258,9 @@ CASE_SUB_SCREENS = [
 
     SubScreen("Documents", kind=CONTEXT_MENU, open_row_detail=True),
 
-    SubScreen("CRMD Note", kind=CONTEXT_MENU),
+    # Renamed in the application from 'CRMD Note' — the sidebar entry is now
+    # 'RMG Memo' (/ca-package/rmg-memo).
+    SubScreen("RMG Memo", kind=CONTEXT_MENU),
 
     # report_as distinguishes this from the obligor's own History tab, which is
     # a different screen with the same label.
@@ -285,7 +295,7 @@ TARGETS: dict[str, Target] = {
     #     ),
     #     steps=[
     #         NavStep(kind=MENU, label="My Bucket", path=_BUCKET_PATH),
-    #         NavStep(kind=ROW_BY_ID, value="{case_id}", missing_is_environmental=True),
+    #         NavStep(kind=ROW_BY_ID, value="{case_id}", missing_is_blocked=True),
     #         NavStep(kind=CONTEXT_MENU, label="Obligor Details (BIR)"),
     #     ],
     #     sub_screens=OBLIGOR_SUB_SCREENS,
@@ -314,7 +324,7 @@ TARGETS: dict[str, Target] = {
     #     ),
     #     steps=[
     #         NavStep(kind=MENU, label="My Bucket", path=_BUCKET_PATH),
-    #         NavStep(kind=ROW_BY_ID, value="{case_id}", missing_is_environmental=True),
+    #         NavStep(kind=ROW_BY_ID, value="{case_id}", missing_is_blocked=True),
     #     ],
     #     sub_screens=CASE_SUB_SCREENS,
     #     id_pattern=CASE_ID_PATTERN,
@@ -349,7 +359,7 @@ TARGETS: dict[str, Target] = {
     #                 "when that is all you need.",
     #     steps=[
     #         NavStep(kind=MENU, label="My Bucket", path=_BUCKET_PATH),
-    #         NavStep(kind=ROW_BY_ID, value="{case_id}", missing_is_environmental=True),
+    #         NavStep(kind=ROW_BY_ID, value="{case_id}", missing_is_blocked=True),
     #         NavStep(kind=CONTEXT_MENU, label="Obligor Details (BIR)"),
     #     ],
     #     sub_screens=[OBLIGOR_SUB_SCREENS[0]],
@@ -371,7 +381,7 @@ TARGETS: dict[str, Target] = {
     #     ),
     #     steps=[
     #         NavStep(kind=MENU, label="All Obligors", path=_OBLIGOR_LIST_PATH),
-    #         NavStep(kind=ROW_BY_ID, value="{case_id}", missing_is_environmental=True),
+    #         NavStep(kind=ROW_BY_ID, value="{case_id}", missing_is_blocked=True),
     #     ],
     #     sub_screens=OBLIGOR_SUB_SCREENS,
     #     id_pattern=CUSTOMER_ID_PATTERN,
@@ -403,7 +413,7 @@ def resolve(target: Target, case_id: str) -> Target:
         NavStep(kind=s.kind, label=s.label, path=s.path,
                 value=(s.value or "").replace("{case_id}", case_id or ""),
                 satisfied_if_active=s.satisfied_if_active,
-                missing_is_environmental=s.missing_is_environmental)
+                missing_is_blocked=s.missing_is_blocked)
         for s in target.steps
     ]
     return Target(

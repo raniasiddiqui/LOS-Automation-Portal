@@ -36,6 +36,7 @@ import streamlit as st
 
 import config as crawler_config
 from los_automation import settings
+from los_automation.runner import case_flows as cf
 from los_automation.runner import jobs
 from los_automation.runner import results as R
 from los_automation.runner import targets as tg
@@ -56,7 +57,7 @@ FORM_COLUMNS = [2, 3]
 BADGE = {
     R.PASS: ("✅", "#1a7f37", "Passed"),
     R.FAIL: ("❌", "#b42318", "Failed"),
-    R.ERROR: ("⚠️", "#b54708", "Could not run"),
+    R.BLOCKED: ("⚠️", "#b54708", "Blocked"),
 }
 
 
@@ -514,6 +515,145 @@ CASE_SCREENS = [
      "own with a generated test image, then opens one of the checklist "
      "documents and actions it — attaching a file, editing its fields and "
      "saving."),
+    ("litigation", "Litigation",
+     "Opens the litigation entry form from the screen's '+' and records a "
+     "suit — type of suit, filing date, the court, the bank's lawyer and law "
+     "firm, both hearing dates, the suit amount, the proceeding details and "
+     "the date of decree — then Save."),
+    ("shariah_comments", "Shariah Comments",
+     "Writes the screen's one field — the SCD Remarks rich-text editor — and "
+     "saves it. The quickest of these checks, and the one that rests entirely "
+     "on the round trip: there is no list or grid to grow, so whether the "
+     "editor's content was stored is only answered by re-opening the case."),
+    # Renamed in the application from 'CRMD Note'. The key stays crmd_note —
+    # it is what --fill-case and the jobs layer take.
+    ("crmd_note", "RMG Memo",
+     "Writes all eight narrative editors — recommendation, industry strategy, "
+     "internal indicators, audit observations, return on capital, key credit "
+     "concerns, risk observations and risk exposure strategy — and saves "
+     "them. Each box gets its own text naming its own section, so the round "
+     "trip can tell which one came back."),
+    ("credit_memorandum", "Credit Memorandum",
+     "Writes all thirty-three narrative editors — background and rationale, "
+     "the financial projections and variance sections, industry and internal "
+     "indicators, ways out, collateral justification, governance and the rest "
+     "— and saves them. The longest of these runs by a distance: every editor "
+     "is typed into and then read back before saving."),
+    ("group_review", "Group Review",
+     "Writes all seven narrative editors — group background, group companies, "
+     "industry and peer analysis, trade business through NBP, relationship "
+     "yield, relationship strategy and risk advice — and saves them. This "
+     "screen is not on every case: where the case menu does not offer it, the "
+     "run says so rather than reporting a failure."),
+    ("business_performance", "Business Performance",
+     "Covers BOTH sub-menus in one check — Customer Business Performance and "
+     "Group Business Reciprocity. Each is a grid of ten figures against a "
+     "period: it opens the sub-menu, enters every figure the screen lets it, "
+     "saves, and then goes back inside that same sub-menu to read each one "
+     "back. The two are given deliberately different numbers, because they "
+     "share all ten row names and identical values would let a figure stored "
+     "against the wrong sub-menu pass both checks. The three figures the "
+     "application works out for itself — total income, annualized yield, net "
+     "yield — are left alone and checked against its own arithmetic instead."),
+    ("bank_relationships", "Relationship with Other Banks / FIs",
+     "Creates a bank relationship end to end: checks the Add dialog refuses "
+     "an empty Bank Name, chooses a bank and Proceeds, adds a row to the "
+     "LIMITS table through its own '+', writes the three editors, the two "
+     "text areas, the expiry date and the classification status, and Saves. "
+     "The five figures under the LIMITS table are computed by the "
+     "application, so they are checked against the limit row rather than "
+     "entered. Because the relationship is created by this run, the round "
+     "trip re-opens that record specifically rather than the first on the "
+     "list."),
+    ("ecib_details", "eCIB Details",
+     "The biggest screen here, and BOTH ways a record can be created on it — "
+     "one after the other, reported separately.\n\n"
+     "**1. The '+ Add' route.** Checks the dialog refuses an empty form with "
+     "all three of its messages, creates the record, then fills the record's "
+     "page — basic details, limits, outstanding liabilities, rescheduled, "
+     "write-offs and overdue — and Saves. Three sections are gated by a "
+     "Yes/No dropdown that has to be answered before their fields will "
+     "accept anything, and seven figures are computed by the application: "
+     "those are checked against their own arithmetic both before and after "
+     "the record is re-opened.\n\n"
+     "**2. The '+ Upload' route.** Attaches a PDF of a State Bank CIB "
+     "report, picks the eCIB type and status, presses Proceed — then checks "
+     "the record the application BUILT against what the document actually "
+     "says, on the list and again on the record's own page. Nothing is typed "
+     "except the type and the status, so what is under test is the "
+     "extraction. Two documents go through: a corporate report (AKHUWAT) and "
+     "an individual one (ABDUR RAUF KHAN). Unlike the Add dialog, Proceed "
+     "here writes the record outright — there is no Save — and it OVERWRITES "
+     "any record held against the same borrower code rather than adding a "
+     "second, so a dry run can only check the dialog."),
+    ("pr_checklist", "PR Checklist",
+     "Presses **Perform PR**, then walks the checklist form section by "
+     "section. The sections are configuration, so nothing is authored: it "
+     "iterates every 'PR Factor' row it finds, sets each editable 'Factor "
+     "Value', and asserts the frozen ones (Margin Requirement) really are "
+     "frozen rather than skipping them quietly. 'Regulatory Requirement', "
+     "'Actual Value' and 'Compliant Status' are never typed into — the "
+     "application computes those.\n\n"
+     "Then **Generate first, Save second** — that order matters, since "
+     "Generate is what fills the three computed columns and saving first "
+     "would store them empty. The computed values are snapshotted between "
+     "the two, and that snapshot is the expected data: the run goes back to "
+     "the PR RISK RATING LOG, checks a new row arrived with Perform By "
+     "matching the signed-in user and both dates reading today, re-opens it "
+     "through the eye icon, and compares every factor against the snapshot — "
+     "one check per factor, so one mismatch cannot hide the rest. Finally it "
+     "presses Generate Pdf and confirms a document actually comes back."),
+    ("financials", "Financials",
+     "One menu entry over four sub-tabs, each reported separately.\n\n"
+     "**Financials Input:** presses **New Statement**, fills the Add "
+     "Financials dialog and Proceeds — twice, for two different financial "
+     "years. The tick on 'Audited financials?' goes first because it is what "
+     "ENABLES Type of Auditor and Financial Auditor; the Start and End dates "
+     "are never typed, because choosing the year fills them in and the app "
+     "refuses a typed End Date. Then it walks the chart of accounts — 453 "
+     "rows, of which 177 are editable and the rest are the application's own "
+     "totals — filling what is enabled and skipping what is grey, and "
+     "Saves.\n\n"
+     "**Financial Variance Analysis:** presses Perform Financial Analysis "
+     "and fills the VARIANCE COMMENTS column, which is the only writable one."
+     "\n\n"
+     "**Financial Peer Analysis:** presses Perform Peer Analysis, adds a peer "
+     "through its dialog, presses Calculate, and writes the comments.\n\n"
+     "**Financial Analysis:** writes all seven rich text editors and Saves — "
+     "these are verified by the round trip.\n\n"
+     "A financial year the case already holds cannot be added again, so set "
+     "**LOS_FIN_YEARS** to years it does not have. LOS_FIN_MAX_CELLS caps how "
+     "many of the 177 chart cells are filled (40 by default — every cell is a "
+     "round trip through Angular, so filling all of them takes a long time)."),
+    ("history", "History",
+     "The only **read-only** check here — it writes nothing, so a dry run "
+     "and a live run do exactly the same thing.\n\n"
+     "**Workflow Log:** checks the grid's five columns, then clicks the "
+     "**View Changes** link on the first row and asserts the screen actually "
+     "responded — it does not treat a click that raised no error as a pass. "
+     "Any real response counts (a dialog, a new tab, a route change, or the "
+     "row expanding in place) and the report says which one happened; on "
+     "this build it expands inline, taking the grid from 8 rows to 151.\n\n"
+     "**Requests History:** checks that tab's six columns, then clicks a grid "
+     "**row** — deliberately not the 'i' icon beside it — and asserts it "
+     "navigates to that transaction, logging whichever screen it lands on. "
+     "That click really does change transaction, so this check runs last and "
+     "returns to the original case afterwards."),
+]
+
+# One button per case screen, in the order a run fills them. Sorted against
+# case_flows.ORDER rather than written out in order by hand, so the buttons
+# cannot drift from the order the "check all" run actually uses.
+#
+# Any screen in ORDER that has no blurb here still gets a button, captioned
+# from its own label — a screen added to case_flows can never go missing from
+# the portal just because nobody wrote a description for it.
+_BLURBS = {k: (t, b) for k, t, b in CASE_SCREENS}
+CASE_SCREENS = [
+    (k, _BLURBS[k][0] if k in _BLURBS else cf.SCREEN_LABEL[k],
+     _BLURBS[k][1] if k in _BLURBS else
+     f"Fills {cf.SCREEN_LABEL[k]} and verifies it by round trip.")
+    for k in cf.ORDER
 ]
 
 
@@ -780,14 +920,14 @@ def render_result(job: jobs.Job) -> None:
         return
 
     target_title = result.get("target_title", job.target_key)
-    overall = result.get("overall", R.ERROR)
+    overall = result.get("overall", R.BLOCKED)
     icon, colour, word = BADGE.get(overall, ("•", "", overall))
 
     st.subheader(f"{icon} {target_title} — {word}")
     if result.get("case_id"):
         st.caption(f"Record {result['case_id']}")
     render_created(result)
-    counts = {R.PASS: 0, R.FAIL: 0}
+    counts = {R.PASS: 0, R.FAIL: 0, R.BLOCKED: 0}
     for c in result.get("checks", []):
         counts[c["status"]] = counts.get(c["status"], 0) + 1
     notes = result.get("notes") or []
@@ -811,7 +951,7 @@ def render_result(job: jobs.Job) -> None:
                     st.caption(s["note"])
 
     # ---- checks, grouped by screen, failures first ----------------------
-    order = {R.FAIL: 0, R.PASS: 1}
+    order = {R.FAIL: 0, R.BLOCKED: 1, R.PASS: 2}
     checks = sorted(result.get("checks", []),
                     key=lambda c: (order.get(c["status"], 9), c["name"]))
 
@@ -823,7 +963,7 @@ def render_result(job: jobs.Job) -> None:
         st.markdown("### Screens checked")
         rows = []
         for screen, items in by_screen.items():
-            cnt = {R.PASS: 0, R.FAIL: 0}
+            cnt = {R.PASS: 0, R.FAIL: 0, R.BLOCKED: 0}
             for c in items:
                 cnt[c["status"]] = cnt.get(c["status"], 0) + 1
             worst = R.FAIL if cnt[R.FAIL] else R.PASS
@@ -953,11 +1093,11 @@ def _batch_rows(batch: list[jobs.Job]) -> list[dict]:
     rows = []
     for i, job in enumerate(batch, 1):
         result = job.result() or {}
-        counts = {R.PASS: 0, R.FAIL: 0}
+        counts = {R.PASS: 0, R.FAIL: 0, R.BLOCKED: 0}
         for c in result.get("checks", []):
             counts[c["status"]] = counts.get(c["status"], 0) + 1
         finished = not job.running and bool(result)
-        overall = result.get("overall", R.ERROR)
+        overall = result.get("overall", R.BLOCKED)
         rows.append({
             "": (BADGE.get(overall, ("•",))[0] if finished
                  else "⏳" if job.running else "—"),
@@ -1035,7 +1175,7 @@ def render_batch_result(batch: list[jobs.Job]) -> None:
     rows = _batch_rows(batch)
     st.subheader(f"Combined report — {len(batch)} obligors")
 
-    totals = {R.PASS: 0, R.FAIL: 0}
+    totals = {R.PASS: 0, R.FAIL: 0, R.BLOCKED: 0}
     observed = 0
     for r in rows:
         totals[R.PASS] += r["Passed"]

@@ -91,8 +91,8 @@ def verify(target_key: str, headless: Optional[bool] = None,
             try:
                 s.login()
             except NavigationError as e:
-                # Nothing about the application is known if we never got in.
-                result.error_reason = str(e)
+                result.blocked_reason = str(e)
+                result.checks.append(R.blocked("Sign in to the application", str(e)))
                 result.steps = s.steps
                 return _finish(result, _emit, say)
 
@@ -104,8 +104,10 @@ def verify(target_key: str, headless: Optional[bool] = None,
                 where = s.steps[-1] if s.steps else None
                 name = f"Reach {target.title}"
                 detail = f"Stopped at step {where.index} ({where.kind})." if where else ""
-                if e.environmental:
-                    result.error_reason = f"{e} {detail}".strip()
+                if e.blocked:
+                    result.blocked_reason = str(e)
+                    result.checks.append(R.blocked(name, f"{e} {detail}".strip(),
+                                                   evidence=[shot] if shot else []))
                 else:
                     result.checks.append(R.failed(
                         name, expected="the screen can be reached by its menu path",
@@ -119,7 +121,9 @@ def verify(target_key: str, headless: Optional[bool] = None,
             result.steps = s.steps
 
     except Exception as e:  # noqa: BLE001 - browser/environment failure, not a defect
-        result.error_reason = humanise(e)
+        explained = humanise(e)
+        result.blocked_reason = explained
+        result.checks.append(R.blocked("Reach the application", explained))
 
     return _finish(result, _emit, say)
 
@@ -130,7 +134,13 @@ def verify(target_key: str, headless: Optional[bool] = None,
 
 def _worst(checks: list[R.Check]) -> str:
     """The status a screen should be shown as: any failure dominates."""
-    return R.FAIL if any(c.status == R.FAIL for c in checks) else R.PASS
+    worst = R.PASS
+    for c in checks:
+        if c.status == R.FAIL:
+            return R.FAIL
+        if c.status == R.BLOCKED:
+            worst = R.BLOCKED
+    return worst
 
 
 def _walk_screens(s: Session, target: Target, result: R.RunResult,
@@ -179,23 +189,17 @@ def _walk_screens(s: Session, target: Target, result: R.RunResult,
 
     def unreachable(sub: SubScreen, e: NavigationError) -> None:
         shot = s.screenshot(f"{target.key}-{sub.name[:24]}-missing")
-        # An environmental stop — no test data in the grid, say — says nothing
-        # about whether the screen exists, so it is written down rather than
-        # asserted on. A screen the app simply does not offer is a finding.
-        if e.environmental:
-            result.notes.append(R.observation(
-                f"{sub.name} could not be reached", str(e),
-                evidence=[shot] if shot else [], screen=sub.name))
-            status = R.ERROR
+        if e.blocked:
+            chk = R.blocked(f"{sub.name} can be opened", str(e),
+                            evidence=[shot] if shot else [])
         else:
             chk = R.failed(f"{sub.name} can be opened",
                            expected=f"a '{sub.name}' screen exists",
                            actual=str(e), evidence=[shot] if shot else [])
-            chk.screen = sub.name
-            result.checks.append(chk)
-            status = chk.status
+        chk.screen = sub.name
+        result.checks.append(chk)
         emit({"kind": "screen_done", "index": seq["n"], "total": total,
-              "screen": sub.name, "status": status,
+              "screen": sub.name, "status": chk.status,
               "note": str(e)[:160], "shot": shot})
 
     def drill_into_record(sub: SubScreen) -> None:

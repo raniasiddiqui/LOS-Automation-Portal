@@ -2387,13 +2387,68 @@ def raise_transaction(s: Session, f: W.Filler, say, step,
 # Verify: re-read the obligor THROUGH the credit case
 # --------------------------------------------------------------------------
 
+def _open_row_matching(s: Session, needle: str) -> tuple[Optional[str], int]:
+    """
+    Click the row on THIS grid page whose text contains `needle`.
+
+    Returns (row text, rows examined), with the row text None when no row on
+    this page matches. Shared by the search path and the paging path so both
+    open a record exactly the same way.
+    """
+    want = needle.strip().lower()
+    openers = cr.collect_row_openers(s.page, max_rows=400)
+    match = next((r for r in openers
+                  if want in (r.get("row_preview") or "").lower()), None)
+    if match is None:
+        return None, len(openers)
+    if not cr._click_stamped(s.page, "data-crawl-row", match["index"],
+                             timeout=8000):
+        raise NavigationError(f"The case for {needle!r} could not be opened.")
+    cr.wait_until_settled(s.page, s.recorder, timeout_ms=25000, stable_polls=2)
+    cr.stamp_content_root(s.page)
+    return (match.get("row_preview") or ""), len(openers)
+
+
+def _search_bucket(s: Session, needle: str, say) -> bool:
+    """
+    Ask My Bucket's own search box for this record.
+
+    False — with a reason logged — when there was no search box, or when
+    typing is not permitted on this host. Either way the caller pages
+    instead, so a refusal costs nothing but time.
+    """
+    try:
+        found = W.Filler(session=s, screen="My Bucket").search_grid(needle)
+    except W.WriteRefused:
+        say("  the grid's search box needs data entry to be permitted on this "
+            "host; paging through the grid instead")
+        return False
+    except W.FillError as exc:
+        say(f"  the grid's search box would not take {needle!r} "
+            f"({str(exc)[:80]}); paging through the grid instead")
+        return False
+    if not found:
+        say("  My Bucket has no search box on this build; paging instead")
+    return found
+
+
 def find_case(s: Session, needle: str, say, max_pages: int = 12) -> str:
     """
     Find and open a case in My Bucket by request ID or obligor name.
 
-    Pages through the grid rather than typing in its search box, exactly as the
-    read-only runner does, so this stays consistent with how Phase 1 finds
-    records. Returns the row text that matched.
+    The grid's own SEARCH box is asked first. A case can be on any page of
+    the bucket, and paging to it is both slow and CAPPED — twelve pages, after
+    which a record that exists is reported as missing, which is exactly what
+    happened to a case sitting on page 13. Searching asks the server, so it
+    finds the record wherever it is.
+
+    Paging is kept as the fallback and it is not vestigial. It is what runs
+    when the build has no search box, when typing is not permitted on the host
+    (a read-only re-verification), and when a search comes back empty on a
+    grid that turns out to hold the record anyway. So this is never worse at
+    finding a case than paging alone was.
+
+    Returns the row text that matched.
     """
     nav = cr.navigate_in_app(
         s.page,
@@ -2408,32 +2463,39 @@ def find_case(s: Session, needle: str, say, max_pages: int = 12) -> str:
     cr.wait_until_settled(s.page, s.recorder, timeout_ms=20000, stable_polls=2)
     cr.stamp_content_root(s.page)
 
-    want = needle.strip().lower()
-    scanned = 0
+    searched = False
+    if _search_bucket(s, needle, say):
+        searched = True
+        row, seen = _open_row_matching(s, needle)
+        if row is not None:
+            say(f"  found by searching My Bucket for {needle!r}")
+            return row
+        say(f"  the search returned {seen} row(s), none matching {needle!r} — "
+            f"paging through the grid instead")
+        # Clear the filter, or the paging below walks the filtered grid.
+        _search_bucket(s, "", say)
+
+    scanned, page_no = 0, 0
     for page_no in range(1, max_pages + 1):
-        openers = cr.collect_row_openers(s.page, max_rows=400)
-        scanned += len(openers)
-        match = next((r for r in openers
-                      if want in (r.get("row_preview") or "").lower()), None)
-        if match is not None:
+        row, seen = _open_row_matching(s, needle)
+        scanned += seen
+        if row is not None:
             say(f"  found on page {page_no} after {scanned} row(s)")
-            if not cr._click_stamped(s.page, "data-crawl-row", match["index"],
-                                     timeout=8000):
-                raise NavigationError(f"The case for {needle!r} could not be opened.")
-            cr.wait_until_settled(s.page, s.recorder, timeout_ms=25000,
-                                  stable_polls=2)
-            cr.stamp_content_root(s.page)
-            return match.get("row_preview") or ""
+            return row
         # Advance the grid.
         if not s._next_grid_page():
             break
+
     # Nought rows is not a grid that lacks this case — it is a grid that was
     # never read. Saying "the case is not there" about an empty screen sends
     # somebody to look for a missing transaction when what actually happened
     # was that the browser was somewhere else entirely; the rating model opens
     # in a tab of its own, and a session still driving that tab answers this
     # question with a blank page. The two deserve different sentences.
-    if scanned == 0:
+    #
+    # A search that ran still counts as having looked, so this only fires when
+    # neither route saw a single row.
+    if scanned == 0 and not searched:
         raise NavigationError(
             f"My Bucket showed no rows at all, so nothing was searched for "
             f"{needle!r}. The screen reached was {s.page.url} — an empty grid, "
@@ -2441,9 +2503,13 @@ def find_case(s: Session, needle: str, say, max_pages: int = 12) -> str:
             f"This says nothing about whether the case exists.",
             environmental=True)
     raise NavigationError(
-        f"{needle!r} is not in My Bucket. Looked at {scanned} row(s) across "
-        f"{page_no} page(s). A newly raised case should appear immediately, so "
-        f"this suggests the transaction did not complete.",
+        f"{needle!r} is not in My Bucket. "
+        + (f"The grid's search box was asked for it directly, and then "
+           f"{scanned} row(s) across {page_no} page(s) were checked. "
+           if searched else
+           f"Looked at {scanned} row(s) across {page_no} page(s). ")
+        + "A newly raised case should appear immediately, so this suggests "
+          "the transaction did not complete.",
         environmental=True)
 
 
@@ -2518,7 +2584,7 @@ def verify_case(request_id: str, entries: list[dict],
     return res
 
 
-def wait_for_case_menu(s: Session, say, timeout_s: int = 25) -> bool:
+def wait_for_case_menu(s: Session, say, timeout_s: int = 45) -> bool:
     """
     Wait until the opened case's sidebar actually has entries.
 
@@ -2526,6 +2592,13 @@ def wait_for_case_menu(s: Session, say, timeout_s: int = 25) -> bool:
     back, so reading the menu immediately finds nothing and concludes that
     Obligor Details (BIR) does not exist. That reported a missing screen on a
     case that had it, and stopped the round trip before it started.
+
+    The wait was 25 seconds and is now 45. Re-opening the case after a heavy
+    screen is slower than opening it fresh: a Financials run leaves several
+    450-row statements behind, and its round trip was blocking with "the
+    sidebar never populated" on a case whose sidebar was simply still coming.
+    Being more patient can only turn a spurious block into a real answer —
+    a menu that genuinely never arrives is still reported, just later.
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:

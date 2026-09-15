@@ -338,8 +338,11 @@ def start_case_fill(screen: str, case_id: str, dry_run: bool = True,
     """
     Launch the PHASE 2b case-screen flow in its own process.
 
-    `screen` is one of request_details / facilities / observations /
-    collaterals / policies / conditions / documents, or "all".
+    `screen` is any key in case_flows.SCREEN_LABEL - request_details,
+    facilities, observations, collaterals, coverage, financials, risk_rating,
+    credit_memorandum, ecib_details, policies, conditions, documents,
+    crmd_note, shariah_comments, group_review, bank_relationships,
+    business_performance, pr_checklist, litigation, history - or "all".
     One button per screen is the point: Facilities is the slow one — it requests
     a facility and then walks every tab of it — and someone checking only
     Request Details should not have to wait for it, nor have a facility left on

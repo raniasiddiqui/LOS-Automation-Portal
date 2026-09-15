@@ -20,7 +20,7 @@ from . import results as R
 from . import run as run_mod
 from . import targets as tg
 
-_MARK = {R.PASS: "PASS", R.FAIL: "FAIL", R.ERROR: "ERROR"}
+_MARK = {R.PASS: "PASS", R.FAIL: "FAIL", R.BLOCKED: "BLOCK"}
 
 
 def _print_env() -> None:
@@ -82,7 +82,8 @@ def _print_result(result: R.RunResult, show_passes: bool) -> None:
         print("\nPer screen")
         for row in summary:
             print(f"  {_MARK.get(row['status'], '?'):<5} {row['screen'][:32]:<34} "
-                  f"{row['passed']} passed / {row['failed']} failed")
+                  f"{row['passed']} passed / {row['failed']} failed / "
+                  f"{row['blocked']} blocked")
 
     for screen, checks in result.by_screen().items():
         shown = [c for c in checks if show_passes or c.status != R.PASS]
@@ -223,7 +224,7 @@ def _create_obligor(args) -> int:
         print(f"\nArtifacts: {result.artifacts_dir}")
 
     _write_pdf(result.artifacts_dir, args.events, args.quiet)
-    return {R.PASS: 0, R.FAIL: 1, R.ERROR: 2}.get(result.overall, 1)
+    return {R.PASS: 0, R.FAIL: 1, R.BLOCKED: 2}.get(result.overall, 1)
 
 
 def _fill_obligor_details(args) -> int:
@@ -285,7 +286,7 @@ def _fill_obligor_details(args) -> int:
         print(f"\nArtifacts: {result.artifacts_dir}")
 
     _write_pdf(result.artifacts_dir, args.events, args.quiet)
-    return {R.PASS: 0, R.FAIL: 1, R.ERROR: 2}.get(result.overall, 1)
+    return {R.PASS: 0, R.FAIL: 1, R.BLOCKED: 2}.get(result.overall, 1)
 
 
 def _fill_case(args) -> int:
@@ -358,10 +359,16 @@ def _fill_case(args) -> int:
         print(f"\nArtifacts: {result.artifacts_dir}")
 
     _write_pdf(result.artifacts_dir, args.events, args.quiet)
-    return {R.PASS: 0, R.FAIL: 1, R.ERROR: 2}.get(result.overall, 1)
+    return {R.PASS: 0, R.FAIL: 1, R.BLOCKED: 2}.get(result.overall, 1)
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Imported here, not at module scope: case_flows pulls in playwright and
+    # the crawler, and `--help` should not pay for a browser stack it will
+    # never use. The screen list below is read off it so the CLI and the
+    # portal can never disagree about which screens exist.
+    from . import case_flows as cf
+
     ap = argparse.ArgumentParser(
         prog="los-runner",
         description="Verify and (later) exercise Loan Origination System screens.")
@@ -416,27 +423,31 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- Phase 2b: the case's own screens ------------------------------
     ap.add_argument("--fill-case", metavar="SCREEN",
-                    choices=["request_details", "facilities", "observations",
-                             "collaterals", "coverage", "risk_rating",
-                             "policies", "conditions", "documents", "all"],
+                    # Read off case_flows.ORDER rather than listed again here,
+                    # so a screen added there cannot end up reachable from the
+                    # portal but not from the command line.
+                    choices=list(cf.ORDER) + ["all"],
                     help="PHASE 2b, WRITES DATA. Open the case named by "
-                         "--case-id from My Bucket and fill one of its screens "
-                         "— request_details, facilities, observations, "
-                         "collaterals, coverage, risk_rating, policies, "
-                         "conditions or documents — or 'all' for the nine in "
-                         "order, then re-open the case "
-                         "and check every entered value came back. "
+                         "--case-id from My Bucket and fill one of its "
+                         "screens, or 'all' for every one in order, then "
+                         "re-open the case and check every entered value came "
+                         "back. The screens are: "
+                         + ", ".join(cf.ORDER) + ". "
                          "'collaterals' asks for a collateral by "
                          "classification and name and fills every tab it "
                          "opens with; 'risk_rating' scores the case's rating "
-                         "model through Perform Risk Rating and checks the "
-                         "rating reaches the Rating Summary and Rating "
-                         "History; 'policies' raises a policy exception "
-                         "through Add Exception; 'conditions' raises a "
+                         "model through Perform Risk Rating; 'policies' "
+                         "raises a policy exception; 'conditions' raises a "
                          "condition and attaches a file to it; 'documents' "
                          "also downloads whatever the case already has "
-                         "attached. Refused unless the host is in "
-                         "LOS_ALLOWED_WRITE_HOSTS.")
+                         "attached; 'ecib_details' covers both the Add dialog "
+                         "and the PDF upload route; 'financials' walks the "
+                         "chart of accounts and its three analysis tabs; "
+                         "'pr_checklist' performs and generates the PR; "
+                         "'crmd_note' is the screen the application now calls "
+                         "RMG Memo - the key did not change; 'history' is "
+                         "read-only and writes nothing. Refused unless the "
+                         "host is in LOS_ALLOWED_WRITE_HOSTS.")
     # ---- Phase 2c: the rest of the obligor, on an existing case ---------
     ap.add_argument("--fill-obligor-details", action="store_true",
                     help="PHASE 2c, WRITES DATA. Open the case named by "
@@ -506,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     _write_pdf(result.artifacts_dir, args.events, args.quiet)
     # FAIL is a finding (exit 1); ERROR is an environment problem (exit 2), so
     # CI can tell "the app is broken" from "we could not test it".
-    return {R.PASS: 0, R.FAIL: 1, R.ERROR: 2}.get(result.overall, 1)
+    return {R.PASS: 0, R.FAIL: 1, R.BLOCKED: 2}.get(result.overall, 1)
 
 
 if __name__ == "__main__":

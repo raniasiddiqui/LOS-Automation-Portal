@@ -69,13 +69,35 @@ class FillError(Exception):
     half-filled a form must fail loudly rather than save a partial record."""
 
 
-def assert_writable() -> str:
-    """Gate 1. Called by every entry point here, and again before each commit."""
-    allowed, reason = settings.write_allowed(crawler_config.BASE_URL)
+class FrozenField(FillError):
+    """
+    The control exists but the application has deliberately locked it.
+
+    Its own class because it is NOT a defect and must not be reported as one.
+    The PR checklist freezes some factor values on purpose — Margin
+    Requirement is the confirmed example — so a flow catches this, records
+    "skipped, frozen field" and carries on, while an ordinary FillError still
+    means something is wrong.
+    """
+
+
+def assert_writable(url: str = "") -> str:
+    """
+    Gate 1. Called by every entry point here, and again before each commit.
+
+    `url` checks a SPECIFIC page rather than the configured base. That matters
+    because not every screen in this application lives on the configured host:
+    PR Checklist's 'Perform PR' opens a different app on a different machine
+    (an .aspx page on 10.11.12.10) in a new tab. Checking only
+    crawler_config.BASE_URL would have said "approved" while the run typed
+    into a host nobody had approved — the allowlist would have been a
+    formality. Callers acting on a page other than the main one pass its URL.
+    """
+    target = url or crawler_config.BASE_URL
+    allowed, reason = settings.write_allowed(target)
     if not allowed:
         raise WriteRefused(
-            f"Data entry is not permitted against {crawler_config.BASE_URL}. "
-            f"{reason}")
+            f"Data entry is not permitted against {target}. {reason}")
     return reason
 
 
@@ -99,6 +121,29 @@ NEVER = [
     r"\bauthorize\b", r"\bsign ?out\b", r"\blog ?out\b", r"\bwithdraw\b",
     r"\brelease\b", r"\bbulk\b", r"\bforward\b", r"\breturn\b",
 ]
+
+
+# The application keeps an ngx-ui-loader overlay in the DOM permanently. While
+# it is "up" it is opacity:0 but full-screen, z-index 99998 and
+# pointer-events:auto, so it swallows clicks without any visible sign. This is
+# the condition for "no overlay is currently eating pointer events" — opacity
+# is deliberately NOT part of it, because an invisible overlay blocks just as
+# effectively as a visible one.
+_NO_BLOCKING_OVERLAY = """() => {
+    const o = [...document.querySelectorAll('.ngx-overlay, .loading-foreground')];
+    return !o.some(el => {
+        const s = getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden'
+               && s.pointerEvents !== 'none'
+               && el.getBoundingClientRect().width > 0;
+    });
+}"""
+
+
+def _norm_label(text: str) -> str:
+    """Compare two row or field names without punctuation or case."""
+    s = (text or "").strip().lower().replace("&", " and ")
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", s)).strip()
 
 
 def _text_arrived(wanted: str, got: str) -> bool:
@@ -798,10 +843,10 @@ class Filler:
                      "%B %d, %Y")
 
     def _calendar_open(self) -> bool:
-        cal = self.page.locator(
-            "bs-datepicker-container, bs-daterangepicker-container").first
         try:
-            return bool(cal.count()) and cal.is_visible(timeout=300)
+            return self.page.locator(
+                "bs-datepicker-container, bs-daterangepicker-container, "
+                ".bs-datepicker").first.is_visible(timeout=300)
         except PWError:
             return False
 
@@ -1554,11 +1599,24 @@ class Filler:
                     chosen = txt
                     break
         else:
-            want = value.strip().lower()
-            idx = next((i for i, t in enumerate(texts) if t.lower() == want), None)
+            # Runs of whitespace are collapsed on BOTH sides before matching.
+            # The bank list on Relationship with Other Banks offers 'Islamic
+            # Bank' with two spaces in it, so asking for the name as anyone
+            # would write it found nothing at all — and the alternative was
+            # copying the app's own typo into a spec file, where the next
+            # reader would quite reasonably tidy it away again.
+            #
+            # Strictly more forgiving than a plain comparison: an option that
+            # matched before still matches, and an exact match still wins over
+            # a containment one.
+            def _flat(t: str) -> str:
+                return re.sub(r"\s+", " ", (t or "").strip().lower())
+
+            want = _flat(value)
+            flat = [_flat(t) for t in texts]
+            idx = next((i for i, t in enumerate(flat) if t == want), None)
             if idx is None:
-                idx = next((i for i, t in enumerate(texts)
-                            if want in t.lower()), None)
+                idx = next((i for i, t in enumerate(flat) if want in t), None)
             if idx is None:
                 self._dismiss_overlay()
                 raise FillError(
@@ -2347,3 +2405,1275 @@ class Filler:
             r"minimum|maximum|at least|digits?|characters?", re.I)
         return [m for m in self.messages()["fields"] if looks.search(m)]
 
+    _SEARCH_SEL = (
+        '[data-crawl-root] input[type="search"]',
+        '[data-crawl-root] input[placeholder*="Search"]',
+        '[data-crawl-root] input[placeholder*="search"]',
+        'input[type="search"]',
+    )
+
+    _DISMISS = ("Cancel", "Close", "Back", "No")
+
+    _CELL_SEL = 'input:not([type=hidden]), textarea'
+
+    _GRID_JS = r"""(payload) => {
+        const [want, column, doStamp] = payload;
+        const INP = 'input:not([type=hidden]), textarea';
+        const norm = (s) => (s || '').toLowerCase().replace(/&/g, ' and ')
+            .replace(/[^a-z0-9]+/g, ' ').trim();
+        const vis = (e) => e.offsetParent !== null
+                        || e.getClientRects().length > 0;
+        const root = document.querySelector('[data-crawl-root]')
+                  || document.body;
+        root.querySelectorAll('[data-crawl-cell]').forEach(
+            (e) => e.removeAttribute('data-crawl-cell'));
+
+        const shape = [...root.querySelectorAll('table')].filter(vis)
+            .map((t) => {
+                const rows = [...t.querySelectorAll('tr')].filter(vis);
+                return {t: t, rows: rows,
+                        valueRows: rows.filter(
+                            (r) => r.querySelectorAll(INP).length)};
+            });
+        const labels = shape.filter(
+            (s) => s.valueRows.length === 0 && s.rows.length > 0);
+        const values = shape.filter((s) => s.valueRows.length > 0);
+        if (!labels.length)
+            return {ok: false, why: 'this screen has no table of row labels'};
+        if (!values.length)
+            return {ok: false, why: 'this screen has no table of input boxes'};
+
+        const pairs = [];
+        for (const L of labels)
+            for (const V of values)
+                if (V.valueRows.length === L.rows.length) pairs.push([L, V]);
+        if (!pairs.length)
+            return {ok: false, why: 'no label table has as many rows as a '
+                    + 'table of inputs (labels: '
+                    + labels.map((l) => l.rows.length).join('/')
+                    + ', inputs: '
+                    + values.map((v) => v.valueRows.length).join('/') + ')'};
+        if (pairs.length > 1)
+            return {ok: false, why: pairs.length + ' label/input table '
+                    + 'pairings are possible, so which grid is meant cannot '
+                    + 'be told'};
+
+        const L = pairs[0][0], V = pairs[0][1];
+        const names = L.rows.map(
+            (r) => (r.innerText || '').replace(/\s+/g, ' ').trim());
+        const cells = V.valueRows.map(
+            (r) => [...r.querySelectorAll(INP)].map((i) => ({
+                value: (i.value || '').trim(),
+                readonly: i.disabled === true || i.readOnly === true})));
+
+        // The column headers sit outside both tables, in the panel's own
+        // header block, and the inputs carry no text of their own — so the
+        // LAST leaf texts on the panel are the column names. Validated
+        // before use: a candidate that repeats a metric name, or that reads
+        // like the period above it, means the layout is not what this
+        // expects, and the caller is given plain column numbers instead of a
+        // name that might be wrong.
+        const wide = cells.length ? cells[0].length : 0;
+        let cols = [];
+        if (wide) {
+            const leaves = [];
+            for (const e of root.querySelectorAll('span, th, td, h6, div, p')) {
+                if (e.children.length || !vis(e)) continue;
+                const t = (e.textContent || '').trim();
+                if (t && t.length < 60) leaves.push(t);
+            }
+            const tail = leaves.slice(-wide);
+            const known = names.map(norm);
+            const ok = tail.length === wide && tail.every(
+                (t) => t && !known.includes(norm(t))
+                       && !/\d{4}/.test(t));
+            if (ok) cols = tail;
+        }
+        const info = {ok: true, names: names, cells: cells, columns: cols,
+                      wide: wide};
+        if (!want) return info;
+
+        const hits = [];
+        names.forEach((n, i) => { if (norm(n) === norm(want)) hits.push(i); });
+        if (!hits.length)
+            return Object.assign(info, {ok: false,
+                why: 'no row is named ' + JSON.stringify(want)});
+        if (hits.length > 1)
+            return Object.assign(info, {ok: false, why: hits.length
+                + ' rows are named ' + JSON.stringify(want)});
+
+        const ri = hits[0];
+        const inputs = [...V.valueRows[ri].querySelectorAll(INP)];
+        if (column < 0 || column >= inputs.length)
+            return Object.assign(info, {ok: false, why: 'row '
+                + JSON.stringify(want) + ' has ' + inputs.length
+                + ' column(s), so there is no column ' + (column + 1)});
+        const target = inputs[column];
+        if (doStamp) target.setAttribute('data-crawl-cell', '1');
+        return Object.assign(info, {ok: true, row: ri, rowName: names[ri],
+            value: (target.value || '').trim(),
+            readonly: target.disabled === true || target.readOnly === true});
+    }"""
+
+    _BLOCK_JS = r"""([want, column, block, doStamp]) => {
+        const INP = 'input:not([type=hidden]), textarea';
+        const norm = (s) => (s || '').toLowerCase().replace(/&/g, ' and ')
+            .replace(/[^a-z0-9]+/g, ' ').trim();
+        const vis = (e) => e.offsetParent !== null
+                        || e.getClientRects().length > 0;
+        const root = document.querySelector('[data-crawl-root]')
+                  || document.body;
+        root.querySelectorAll('[data-crawl-cell]').forEach(
+            (e) => e.removeAttribute('data-crawl-cell'));
+
+        const shape = [...root.querySelectorAll('table')].filter(vis)
+            .map((t) => {
+                const rows = [...t.querySelectorAll('tr')].filter(vis);
+                return {t: t, rows: rows,
+                        valueRows: rows.filter(
+                            (r) => r.querySelectorAll(INP).length)};
+            });
+        const labels = shape.filter(
+            (s) => s.valueRows.length === 0 && s.rows.length > 0);
+        if (!labels.length)
+            return {ok: false, why: 'this screen has no table of row labels'};
+        // The widest label table, in case the panel carries a stray one.
+        const L = labels.reduce((a, b) => b.rows.length > a.rows.length ? b : a);
+        const names = L.rows.map(
+            (r) => (r.innerText || '').replace(/\s+/g, ' ').trim());
+
+        const blocks = shape.filter((s) => s.valueRows.length === L.rows.length);
+        if (!blocks.length)
+            return {ok: false, why: 'no table of inputs has as many rows ('
+                    + L.rows.length + ') as the table of row names'};
+
+        const described = blocks.map((B, bi) => {
+            const r = B.t.getBoundingClientRect();
+            return {
+                index: bi, x: Math.round(r.x),
+                wide: B.valueRows.length
+                    ? B.valueRows[0].querySelectorAll(INP).length : 0,
+                cells: B.valueRows.map((row) =>
+                    [...row.querySelectorAll(INP)].map((i) => ({
+                        value: (i.value || '').trim(),
+                        placeholder: i.getAttribute('placeholder') || '',
+                        readonly: i.disabled === true || i.readOnly === true}))),
+            };
+        });
+        const info = {ok: true, names: names, blocks: described,
+                      count: blocks.length};
+        if (!want) return info;
+
+        if (block < 0 || block >= blocks.length)
+            return Object.assign(info, {ok: false, why: 'there is no period '
+                + (block + 1) + '; the screen shows ' + blocks.length});
+        const hits = [];
+        names.forEach((n, i) => { if (norm(n) === norm(want)) hits.push(i); });
+        if (!hits.length)
+            return Object.assign(info, {ok: false,
+                why: 'no row is named ' + JSON.stringify(want)});
+        if (hits.length > 1)
+            return Object.assign(info, {ok: false, why: hits.length
+                + ' rows are named ' + JSON.stringify(want)});
+
+        const ri = hits[0];
+        const inputs = [...blocks[block].valueRows[ri]
+                        .querySelectorAll(INP)];
+        if (column < 0 || column >= inputs.length)
+            return Object.assign(info, {ok: false, why: 'row '
+                + JSON.stringify(want) + ' has ' + inputs.length
+                + ' column(s) in this period, so there is no column '
+                + (column + 1)});
+        const target = inputs[column];
+        if (doStamp) target.setAttribute('data-crawl-cell', '1');
+        return Object.assign(info, {ok: true, row: ri, rowName: names[ri],
+            value: (target.value || '').trim(),
+            readonly: target.disabled === true || target.readOnly === true});
+    }"""
+
+    _FACTOR_JS = r"""([wanted, stamp]) => {
+        const norm = s => (s || '').toLowerCase().replace(/&/g, ' and ')
+            .replace(/[^a-z0-9]+/g, ' ').trim();
+        const txt = e => (e ? (e.textContent || '') : '').trim()
+            .replace(/\s+/g, ' ');
+        const vis = e => e && (e.offsetParent !== null || e.getClientRects().length);
+        const root = document.querySelector('[data-crawl-root]') || document.body;
+        document.querySelectorAll('[data-crawl-cell]').forEach(
+            e => e.removeAttribute('data-crawl-cell'));
+
+        const rows = [];
+        for (const t of root.querySelectorAll('table')) {
+            if (!vis(t)) continue;
+            const heads = [...t.querySelectorAll('th')].map(h => norm(txt(h)));
+            const fi = heads.findIndex(h => h.includes('pr factor'));
+            const vi = heads.findIndex(h => h.includes('factor value'));
+            if (fi < 0 || vi < 0) continue;          // not a factor table
+
+            // The section name. Headings are tried first, but on this screen
+            // they are NOT headings — 'SECURITY REQUIREMENT' and the rest are
+            // plain text sitting above each table, so an ancestor search for
+            // h1-h6 finds nothing and every factor would be reported under
+            // '(no section)'. So: fall back to walking backwards from the
+            // table for the nearest short standalone line of text that is not
+            // itself part of a table.
+            let section = '';
+            let n = t.parentElement;
+            for (let k = 0; k < 6 && n && !section; k++, n = n.parentElement) {
+                const h = n.querySelector(
+                    'h1,h2,h3,h4,h5,h6,.card-title,.panel-title,legend');
+                if (h) section = txt(h);
+            }
+            if (!section) {
+                let node = t;
+                outer:
+                for (let up = 0; up < 4 && node; up++, node = node.parentElement) {
+                    let prev = node.previousElementSibling;
+                    for (let back = 0; back < 6 && prev;
+                         back++, prev = prev.previousElementSibling) {
+                        if (prev.querySelector && prev.querySelector('table')) continue;
+                        const t2 = txt(prev);
+                        if (t2 && t2.length <= 80 && !/^\s*$/.test(t2)) {
+                            section = t2;
+                            break outer;
+                        }
+                    }
+                }
+            }
+
+            // EVERY column is examined, not just 'Factor Value'.
+            //
+            // That was the first version and it was wrong: on the live form
+            // two of the nine settable factors — both 'Linkage between
+            // borrower`s equity ...' rows — carry their writable input in the
+            // ACTUAL VALUE column instead, while other rows have a DISABLED
+            // input in that same column. So "which column is writable" is a
+            // property of the row, not of the table, and the only way to get
+            // it right is to look.
+            //
+            // The rule the screen actually follows, and the one the brief
+            // gives: fill whatever is enabled, leave whatever is grey.
+            for (const tr of t.querySelectorAll('tr')) {
+                if (!vis(tr)) continue;
+                const tds = [...tr.querySelectorAll('td')];
+                if (tds.length <= fi) continue;
+                const factor = txt(tds[fi]);
+                if (!factor) continue;
+
+                // Cells are keyed by the header at the same index, which is
+                // only meaningful while the two line up. On the read-only
+                // view some rows carry a different number of cells from the
+                // header row, and mapping them anyway shifted every value one
+                // column along — which surfaced as 'Yes' appearing under
+                // Regulatory Requirement on one page and Compliant Status on
+                // the other, reported as three failures that were really one
+                // parsing bug. The flag is carried so a comparison can refuse
+                // to compare rather than invent a mismatch.
+                const rec = {section, factor, columns: {}, controls: [],
+                             aligned: tds.length === heads.length,
+                             cells: tds.map(td => txt(td).slice(0, 60))};
+                let writable = null;
+
+                tds.forEach((td, i) => {
+                    const name = heads[i] || ('column ' + (i + 1));
+                    const ctl = td.querySelector('select, ng-select, input, textarea');
+                    if (!ctl) {
+                        rec.columns[name] = txt(td);
+                        return;
+                    }
+                    const tag = ctl.tagName.toLowerCase();
+                    const off = ctl.disabled === true || ctl.readOnly === true
+                        || ctl.hasAttribute('disabled')
+                        || ctl.hasAttribute('readonly')
+                        || ctl.getAttribute('aria-disabled') === 'true'
+                        || /disabled/.test(String(ctl.className || ''));
+                    const info = {col: i, colName: name, kind: tag,
+                                  disabled: off};
+                    if (tag === 'select') {
+                        info.options = [...ctl.querySelectorAll('option')]
+                            .map(o => txt(o)).filter(Boolean);
+                        info.value = txt(ctl.querySelector('option:checked'));
+                    } else if (tag === 'ng-select') {
+                        info.value = txt(ctl.querySelector('.ng-value'));
+                    } else {
+                        info.value = ctl.value || '';
+                        info.type = ctl.getAttribute('type') || 'text';
+                    }
+                    rec.controls.push(info);
+                    rec.columns[name] = info.value;
+                    if (!off && !writable) {
+                        writable = info;
+                        if (stamp && wanted && norm(factor) === norm(wanted)) {
+                            ctl.setAttribute('data-crawl-cell', '1');
+                            rec.stamped = true;
+                        }
+                    }
+                });
+
+                // The flat fields the rest of the suite reads.
+                rec.disabled = !writable;
+                rec.kind = writable ? writable.kind
+                    : (rec.controls[0] || {}).kind || 'text';
+                rec.value = writable ? writable.value
+                    : (rec.controls[0] || {}).value || '';
+                rec.options = writable ? (writable.options || []) : [];
+                rec.writableColumn = writable ? writable.colName : '';
+                rows.push(rec);
+            }
+        }
+        return rows;
+    }"""
+
+    _ROWS_JS = r"""([wanted, index, doStamp]) => {
+        const norm = (s) => (s || '').toLowerCase().replace(/&/g, ' and ')
+            .replace(/[^a-z0-9]+/g, ' ').trim();
+        const txt = (e) => (e ? (e.textContent || '') : '').trim()
+            .replace(/\s+/g, ' ');
+        const vis = (e) => e.offsetParent !== null
+                        || e.getClientRects().length > 0;
+        const root = document.querySelector('[data-crawl-root]')
+                  || document.body;
+        root.querySelectorAll('[data-crawl-cell]').forEach(
+            (e) => e.removeAttribute('data-crawl-cell'));
+
+        const INP = 'input:not([type=hidden]):not([type=checkbox]), textarea';
+        const rows = [];
+        for (const tr of root.querySelectorAll('table tr')) {
+            if (!vis(tr)) continue;
+            const tds = [...tr.querySelectorAll('td')];
+            if (!tds.length) continue;
+            const name = txt(tds[0]);
+            if (!name) continue;
+            const inputs = [...tr.querySelectorAll(INP)].filter(vis);
+            rows.push({
+                name: name,
+                heading: inputs.length === 0,
+                cells: inputs.map((i) => ({
+                    value: (i.value || '').trim(),
+                    readonly: i.disabled === true || i.readOnly === true
+                              || i.hasAttribute('disabled')
+                              || i.hasAttribute('readonly'),
+                })),
+                _el: null,
+            });
+            if (doStamp && wanted && norm(name) === norm(wanted)) {
+                let k = index;
+                if (k < 0) {
+                    // -1 means "the last ENABLED one", which on this screen is
+                    // the statement just created: the columns already saved
+                    // come back read-only.
+                    for (let j = inputs.length - 1; j >= 0; j--) {
+                        const i = inputs[j];
+                        const ro = i.disabled === true || i.readOnly === true
+                            || i.hasAttribute('disabled')
+                            || i.hasAttribute('readonly');
+                        if (!ro) { k = j; break; }
+                    }
+                }
+                if (k >= 0 && k < inputs.length) {
+                    inputs[k].setAttribute('data-crawl-cell', '1');
+                    rows[rows.length - 1].stamped = k;
+                }
+            }
+        }
+        return {ok: true, rows: rows.map((r) => ({
+            name: r.name, heading: r.heading, cells: r.cells,
+            stamped: r.stamped}))};
+    }"""
+
+    _STAMP_AFTER_LABEL_JS = r"""([scope, wanted, ctrlSel]) => {
+        const root = document.querySelector(scope) || document.body;
+        const vis = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
+        const norm = (s) => (s || '').toLowerCase().replace(/&/g, ' and ')
+            .replace(/[^a-z0-9]+/g, ' ').trim();
+        const want = norm(wanted);
+        if (!want) return -1;
+        const LABEL_SEL = 'label, .control-label, .form-label';
+        const own = (l) => {
+            const c = typeof l.className === 'string' ? l.className : '';
+            return !/custom-control-label|form-check-label/.test(c)
+                   && (l.textContent || '').trim().length > 0;
+        };
+        const labels = [...root.querySelectorAll(LABEL_SEL)]
+            .filter(l => vis(l) && own(l));
+        const i = labels.findIndex(
+            l => norm(l.getAttribute('title') || l.textContent) === want);
+        if (i < 0) return -1;
+        const L = labels[i];
+        const N = labels[i + 1] || null;      // the next field's label
+        const follows = (a, b) =>
+            !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+        // The first visible control after this label and before the next.
+        let C = null;
+        for (const c of root.querySelectorAll(ctrlSel)) {
+            if (!vis(c)) continue;
+            if (!follows(L, c)) continue;
+            if (N && follows(N, c)) continue;
+            C = c;
+            break;
+        }
+        if (!C) return -1;
+
+        // Widen to the largest wrapper that still names no field and still
+        // stops short of the next one — for TinyMCE that is .tox-tinymce,
+        // which is what holds the <iframe> the text actually goes into.
+        let node = C;
+        while (node.parentElement && node.parentElement !== root) {
+            const p = node.parentElement;
+            if ([...p.querySelectorAll(LABEL_SEL)].some(l => vis(l) && own(l)))
+                break;
+            if (N && p.contains(N)) break;
+            node = p;
+        }
+        document.querySelectorAll('[data-fill-field]').forEach(
+            e => e.removeAttribute('data-fill-field'));
+        node.setAttribute('data-fill-field', '0');
+        return 0;
+    }"""
+
+    def search_grid(self, value: str, settle_ms: int = 20000) -> bool:
+        """
+        Type into a grid's own search box so the grid filters, and wait for it.
+
+        This is the one thing this module types that is NOT a value being
+        entered into a record, and it is deliberately **not recorded** as an
+        Entry. A search term is navigation, not data: recording it would put
+        it into the round-trip comparison, which exists to compare what was
+        entered against what the record came back holding.
+
+        Everything else about it is unchanged — the host allowlist is checked
+        first, and nothing but a search field is touched.
+
+        Returns False when the screen has no search box, so a caller can fall
+        back to paging rather than fail. A box that is present and refuses the
+        value raises, because that is a finding rather than an absence.
+        """
+        assert_writable()
+        box = None
+        for sel in self._SEARCH_SEL:
+            loc = self.page.locator(sel).first
+            try:
+                if (loc.count() and loc.is_visible(timeout=800)
+                        and not loc.is_disabled(timeout=500)):
+                    box = loc
+                    break
+            except PWError:
+                continue
+        if box is None:
+            return False
+
+        try:
+            box.click(timeout=6000)
+            box.fill("")
+            box.fill(str(value))
+            # Enter for a box that searches on submit; the settle below covers
+            # the filter-as-you-type kind, which needs no key at all.
+            box.press("Enter")
+        except PWError as exc:
+            raise FillError(
+                f"The grid's search box would not accept {value!r}: "
+                f"{str(exc)[:120]}")
+
+        self._settle(settle_ms)
+        try:
+            cr.stamp_content_root(self.page)
+        except PWError:
+            pass
+        self.page.wait_for_timeout(900)
+        return True
+
+    # ---- a grid whose row labels are in a DIFFERENT TABLE ---------------
+    #
+    # Business Performance is built this way, and it defeats every anchor in
+    # _block. The ten metric names are one <table>; the twenty numeric boxes
+    # are another; and the boxes carry no label, no title, no aria-label, no
+    # formcontrolname, the same name="id" on all of them and a duplicate
+    # id="false" or id="true" on every one. There is nothing on an input that
+    # says which metric it belongs to. field_labels() finds nothing here, and
+    # correctly: there are no labelled fields on this screen.
+    #
+    # The join can therefore only be the row's POSITION in its table, which is
+    # the one thing this module refuses to target by everywhere else. What
+    # makes it safe HERE, and what the guards below enforce:
+    #
+    #   * the caller never supplies a position. It names a metric, and the
+    #     name is looked up in the label table.
+    #   * the two tables must have exactly as many rows as each other. A
+    #     layout change that broke the correspondence changes a row count, and
+    #     is refused rather than typed into.
+    #   * the metric must name exactly ONE row. Two matches is ambiguous and
+    #     is refused.
+    #   * exactly one label table and one value table may pair up. On a screen
+    #     with two such grids visible at once, which one was meant cannot be
+    #     told, so nothing is typed.
+    #
+    # Every refusal raises rather than falling back to a guess, because a
+    # wrong guess here writes a number into another metric's box — the same
+    # class of fault as the shared-fieldset bug on Group Review, and silent in
+    # exactly the same way.
+
+    def press_action(self, label: str, settle_ms: int = 30000) -> str:
+        """
+        Click a button that ACTS without saving — 'Perform PR', 'Generate',
+        'Generate Pdf', 'Edit'.
+
+        Separate from commit() because those labels are deliberately not in
+        COMMITTABLE and must stay out of it: COMMITTABLE is the list a flow
+        may SAVE with, and widening it to fit a button that merely opens a
+        form would weaken the guarantee for every screen in the suite.
+
+        The NEVER list still applies, and that is the point of routing this
+        through widgets at all rather than clicking from a flow. Approve,
+        Reject, Delete, Forward and the rest end a case or a session, and no
+        flow may reach them by any door.
+
+        THE DISPATCH FALLBACK, and why it is not cheating: this application
+        keeps an ngx-ui-loader overlay in the DOM at opacity 0 with
+        pointer-events:auto and z-index 99998. It is invisible to a person and
+        a person's click lands, because by the time they aim at anything the
+        overlay has usually gone; an automated click arrives sooner and is
+        silently swallowed — Playwright reports a successful click, the
+        handler never runs, and nothing at all happens. Measured on the PR
+        Checklist screen: a real .click() produced zero network requests,
+        while dispatching the same event on the same element produced two. So
+        the real click is tried FIRST and honestly — the fallback only runs
+        when the click provably did nothing.
+        """
+        # NEVER is checked FIRST, before the host gate and before anything
+        # touches the page. A forbidden label is refused on its name alone —
+        # it needs no browser, no session and no live URL to be wrong — and
+        # ordering it this way means the refusal cannot be skipped by a
+        # failure to read the page.
+        low = (label or "").strip().lower()
+        for pat in NEVER:
+            if re.search(pat, low):
+                raise WriteRefused(
+                    f"{label!r} is never pressed by this suite: it matches "
+                    f"{pat!r}. These end a case or a session rather than "
+                    f"acting on a record.")
+
+        # The LIVE page, not the configured base: press_action is the method
+        # that drives the PR form, and that form is served by a different host.
+        assert_writable(self.page.url)
+
+        scope = self._scope()
+        btn = None
+        for sel in (f'{scope} button:has-text("{label}")',
+                    f'{scope} a.btn:has-text("{label}")',
+                    f'button:has-text("{label}")',
+                    f'a.btn:has-text("{label}")'):
+            loc = self.page.locator(sel)
+            try:
+                n = loc.count()
+            except PWError:
+                continue
+            for i in range(min(n, 12)):
+                cand = loc.nth(i)
+                try:
+                    if cand.is_visible(timeout=400) and not cand.is_disabled(
+                            timeout=400):
+                        btn = cand
+                        break
+                except PWError:
+                    continue
+            if btn is not None:
+                break
+        if btn is None:
+            raise FillError(
+                f"No enabled {label!r} button is visible on this screen.")
+
+        # Wait the overlay out first — that alone fixes most of it.
+        try:
+            self.page.wait_for_function(_NO_BLOCKING_OVERLAY, timeout=20000)
+        except PWError:
+            pass
+
+        # Instrument the button so "did the click land?" is MEASURED on the
+        # element, not guessed from the page.
+        #
+        # An earlier version inferred it from a page fingerprint, and that was
+        # wrong in the dangerous direction: a click that landed but changed
+        # nothing visible within the settle window looked identical to a click
+        # that was swallowed, so the fallback fired and the button was pressed
+        # TWICE. On a control that toggles, two presses are the same as none.
+        # A capture-phase listener on the element itself cannot be fooled by
+        # either.
+        try:
+            btn.evaluate("""el => {
+                el.__pressCount = 0;
+                if (!el.__pressHooked) {
+                    el.__pressHooked = true;
+                    el.addEventListener(
+                        'click', () => { el.__pressCount++; }, true);
+                }
+            }""")
+            instrumented = True
+        except PWError:
+            instrumented = False
+
+        self.session.recorder.clear()
+        try:
+            btn.scroll_into_view_if_needed(timeout=4000)
+        except PWError:
+            pass
+        try:
+            btn.click(timeout=10000)
+        except PWError as exc:
+            raise FillError(f"{label!r} would not click: {str(exc)[:140]}")
+        self._settle(settle_ms)
+
+        if not instrumented:
+            return f"clicked {label}"
+        try:
+            landed = int(btn.evaluate("el => el.__pressCount || 0"))
+        except PWError:
+            # Cannot tell. Assume it landed: a missed form is recoverable, a
+            # double press may not be.
+            landed = 1
+        if landed:
+            return f"clicked {label}"
+
+        # The click provably never reached the element — the loader overlay
+        # ate it. Dispatching is then the FIRST press this button has had, not
+        # a second one.
+        try:
+            fired = self.page.evaluate(
+                """(want) => {
+                    const norm = s => (s || '').trim().toLowerCase();
+                    const b = [...document.querySelectorAll('button, a.btn')]
+                        .find(x => norm(x.textContent).includes(norm(want)));
+                    if (!b) return false;
+                    b.dispatchEvent(new MouseEvent('click',
+                        {bubbles: true, cancelable: true}));
+                    return true;
+                }""", label)
+        except PWError:
+            fired = False
+        if fired:
+            self._settle(settle_ms)
+            return (f"clicked {label} (the real click never reached the "
+                    f"button — the loader overlay ate it — so the event was "
+                    f"dispatched instead; the button was pressed once)")
+        return f"clicked {label}"
+
+    # ---- PR checklist factor tables -------------------------------------
+    #
+    # Not the paired grid above. These are ordinary tables whose columns are
+    # 'PR Factor' (a read-only regulatory label), 'Factor Value' (the only
+    # writable cell), and then 'Regulatory Requirement', 'Actual Value' and
+    # 'Compliant Status', which the application fills in for itself when
+    # Generate is pressed.
+    #
+    # Found by their HEADERS rather than by position or by section name. The
+    # screen repeats this table under every section heading and the sections
+    # are configuration, so a flow that hard-coded 'the third table' or a list
+    # of section names would break the first time one was added — and the
+    # brief asks for every section to be walked, not a named few.
+
+    def radio(self, wanted: str) -> Entry:
+        """
+        Select a radio button by the text beside it.
+
+        Matched on a FRAGMENT, case-insensitively, because these labels are
+        not always spelled the way a specification spells them — the Add Peer
+        dialog offers 'Exisitng Customer', and quoting the app's typo in a
+        flow file is a trap for whoever tidies it next.
+
+        Clicked rather than asserted. The obvious reading of 'Existing
+        Customer is selected by default' is that it needs no click; on this
+        dialog NEITHER radio starts checked, and the field the choice reveals
+        never appears until one is.
+        """
+        assert_writable(self.page.url)
+        scope = self._scope()
+        got = self.page.evaluate(
+            """([scope, want]) => {
+                const root = document.querySelector(scope) || document.body;
+                const norm = s => (s || '').toLowerCase()
+                    .replace(/\\s+/g, ' ').trim();
+                const w = norm(want);
+                const rs = [...root.querySelectorAll('input[type=radio]')];
+                const lab = r => norm(((r.closest('label')
+                    || (r.id && root.querySelector('label[for="' + r.id + '"]'))
+                    || r.parentElement || {}).textContent) || '');
+                const hit = rs.find(r => lab(r).includes(w));
+                if (!hit) return {ok: false,
+                                  offered: rs.map(lab).slice(0, 6)};
+                hit.click();
+                hit.dispatchEvent(new Event('change', {bubbles: true}));
+                return {ok: true, label: lab(hit), checked: hit.checked};
+            }""", [scope, wanted])
+        if not got or not got.get("ok"):
+            raise FillError(
+                f"No radio button reads {wanted!r}. Offered: "
+                + (", ".join(repr(x) for x in (got or {}).get("offered", []))
+                   or "none"))
+        self.page.wait_for_timeout(600)
+        self._settle(15000)
+        if not got.get("checked"):
+            raise FillError(f"{wanted!r} was clicked but did not become "
+                            f"selected.")
+        return self._record(got.get("label") or wanted, "selected", "radio")
+
+    def cancel_modal(self, label: str = "") -> str:
+        """
+        Dismiss the open dialog with its OWN control, discarding what it holds.
+
+        Escape is what _close_modal reaches for first, and Escape is not
+        always only a dialog's problem — on Litigation it closed the whole
+        form being filled. A dialog that offers Cancel or Close should
+        therefore be dismissed by pressing it.
+
+        Not gated by the write allowlist, because it commits nothing: every
+        label it will press is on the closed list above, and a label that is
+        committable at all is refused outright rather than trusted. Returns
+        what it pressed, or "" if no dialog was open.
+
+        Kept public and unused by the happy path on purpose — a cancel-flow
+        test needs it, and a helper written when the flow is added is a helper
+        written against a screen nobody is looking at.
+        """
+        wants = [label] if label else list(self._DISMISS)
+        for want in wants:
+            if _committable(want):
+                raise WriteRefused(
+                    f"{want!r} can commit, so it is not a way to cancel.")
+        try:
+            if not self.page.locator(".modal.show, .modal.in").count():
+                return ""
+        except PWError:
+            return ""
+
+        for want in wants:
+            for sel in (f'.modal.show button:text-is("{want}")',
+                        f'.modal.show .btn:text-is("{want}")',
+                        f'.modal.in button:text-is("{want}")'):
+                try:
+                    loc = self.page.locator(sel).first
+                    if loc.count() and loc.is_visible(timeout=500):
+                        loc.click(timeout=4000)
+                        self._settle(6000)
+                        self.page.wait_for_timeout(500)
+                        return want
+                except PWError:
+                    continue
+
+        # No named control: fall back to the generic dismissal, which is what
+        # every other screen here has always used.
+        self._close_modal()
+        return "the dialog's close control"
+
+    def upload_in_scope(self, path: str, label: str = "") -> Entry:
+        """
+        Attach a file to the file input in the SCOPE being filled.
+
+        The same job as upload(), scoped the way everything else here is: an
+        open dialog wins over the page behind it. upload() takes the first
+        file input in the whole DOCUMENT, which is right on a page that has
+        one and a coin toss for a dialog sitting over a screen with its own —
+        the eCIB list is exactly that, so its Upload dialog needs this.
+
+        The input is normally hidden behind a paperclip button, and that is
+        the case set_input_files exists for: clicking the paperclip opens a
+        native file picker, and an unattended run cannot answer one.
+
+        Settles afterwards, unlike upload(): attaching a file here starts a
+        server-side parse, and the fields that follow cannot be read until it
+        has come back.
+        """
+        assert_writable()
+        if not os.path.exists(path):
+            raise FillError(f"There is no file at {path!r} to attach.")
+
+        scope = self._scope()
+        box = self.page.locator(f"{scope} input[type=file]")
+        try:
+            scoped = box.count()
+        except PWError:
+            scoped = 0
+        if not scoped:
+            # A dialog that renders its input outside itself is not worth
+            # failing over. Falling back to the page is what upload() would
+            # have done anyway.
+            box = self.page.locator("input[type=file]")
+            try:
+                if not box.count():
+                    raise FillError(
+                        "There is no file input in this dialog or on the page "
+                        "behind it.")
+            except PWError as exc:
+                raise FillError(f"The file input could not be read: {exc}")
+
+        box.first.set_input_files(path)
+        self.page.wait_for_timeout(800)
+        self._settle(30000)
+        return self._record(label or "Attachment", os.path.basename(path),
+                            "file")
+
+    # ---- committing -----------------------------------------------------
+
+    def _close_dropdown(self, box) -> None:
+        """
+        Close an ng-select's option panel, and nothing else.
+
+        The same trap as the calendar's, in the same place: Escape closes the
+        panel, and inside a modal it closes the DIALOG too. A dropdown that
+        offers nothing is a field-level problem — it must not take the form
+        that field is on down with it, or one empty reference list reads as
+        every later field having vanished.
+        """
+        if self._scope() != "body":
+            try:
+                box.click(timeout=3000)      # the trigger toggles it shut
+                self.page.wait_for_timeout(200)
+                return
+            except PWError:
+                pass
+        try:
+            self.page.keyboard.press("Escape")
+        except PWError:
+            pass
+
+    def _close_calendar(self, ctl) -> None:
+        """
+        Dismiss the calendar WITHOUT dismissing what is behind it.
+
+        Escape is what closes this picker, and it used to be pressed
+        unconditionally. Inside a modal that is a trap: Escape closes the
+        DIALOG as well, and on the Litigation form it threw the whole entry
+        form away — along with the field that had already been answered, which
+        then read back empty and looked like the application losing a value.
+
+        So: nothing is pressed unless a calendar is actually open. Clicking a
+        day closes it already, which is the usual case and now costs nothing.
+        When one IS open and a modal is up, the trigger is clicked again to
+        toggle it shut, because that cannot reach the dialog. Escape stays as
+        the last resort, and on a screen with no modal it is what it always
+        was.
+        """
+        if not self._calendar_open():
+            return
+        if self._scope() != "body":
+            try:
+                ctl.click(timeout=3000)
+                self.page.wait_for_timeout(300)
+            except PWError:
+                pass
+            if not self._calendar_open():
+                return
+        try:
+            ctl.press("Escape")
+        except PWError:
+            pass
+
+    def _choose_stamped(self, box, factor: str,
+                        value: Optional[str]) -> str:
+        """Open the stamped ng-select and pick from its panel."""
+        try:
+            box.click(timeout=6000)      # must be real; JS click will not open it
+        except PWError as exc:
+            raise FillError(f"{factor!r} would not open: {str(exc)[:120]}")
+        self.page.wait_for_timeout(700)
+        panel = self.page.locator(".ng-dropdown-panel .ng-option")
+        n = panel.count()
+        if not n:
+            self._close_dropdown(box)
+            raise FillError(f"{factor!r} opened no options to choose from.")
+
+        texts = [(panel.nth(i).inner_text() or "").strip() for i in range(n)]
+
+        def _flat(t):
+            return re.sub(r"\s+", " ", (t or "").strip().lower())
+
+        idx = None
+        if value is not None:
+            want = _flat(value)
+            idx = next((i for i, t in enumerate(texts) if _flat(t) == want), None)
+            if idx is None:
+                idx = next((i for i, t in enumerate(texts)
+                            if want in _flat(t)), None)
+            if idx is None:
+                self._close_dropdown(box)
+                raise FillError(
+                    f"{factor!r} has no option matching {value!r}. Offered: "
+                    f"{', '.join(texts[:10])}")
+        else:
+            idx = next((i for i, t in enumerate(texts)
+                        if t and not re.match(r"^-?\s*select\s*-?$|^no items",
+                                              t, re.I)), None)
+            if idx is None:
+                self._close_dropdown(box)
+                raise FillError(f"{factor!r} offered only placeholder options.")
+        panel.nth(idx).click(timeout=6000)
+        return texts[idx]
+
+    # ---- reading back ---------------------------------------------------
+
+    def labelled_rows(self) -> list[dict]:
+        """
+        Every named row of the long grid, with each of its cells' state.
+
+        Read-only. A caller uses it to learn what the screen is showing rather
+        than working from a list of row names that would go stale the first
+        time the chart of accounts changed.
+        """
+        try:
+            got = self.page.evaluate(self._ROWS_JS, ["", -1, False])
+        except PWError:
+            return []
+        return (got or {}).get("rows") or []
+
+    def row_cell_values(self, row_name: str) -> list[str]:
+        """What one named row is showing, across all its columns."""
+        for r in self.labelled_rows():
+            if _norm_label(r.get("name")) == _norm_label(row_name):
+                return [c.get("value", "") for c in (r.get("cells") or [])]
+        return []
+
+    def set_row_cell(self, row_name: str, value: str,
+                     index: int = -1) -> Entry:
+        """
+        Type into one cell of a named row. `index=-1` takes the last ENABLED
+        cell, which is the column this run just created — the ones already
+        saved come back read-only.
+        """
+        assert_writable(self.page.url)
+        try:
+            got = self.page.evaluate(self._ROWS_JS, [row_name, index, True])
+        except PWError as exc:
+            raise FillError(f"The grid could not be read: {str(exc)[:120]}")
+        hit = next((r for r in (got or {}).get("rows", [])
+                    if r.get("stamped") is not None), None)
+        if hit is None:
+            raise FillError(f"No writable cell in a row named {row_name!r}.")
+
+        ctl = self.page.locator('[data-crawl-cell="1"]').first
+        if not ctl.count():
+            raise FillError(f"{row_name!r} could not be located after being "
+                            f"found in the grid.")
+        try:
+            ctl.scroll_into_view_if_needed(timeout=4000)
+            ctl.click(timeout=6000)
+            ctl.fill("")
+            ctl.fill(str(value))
+            ctl.press("Tab")       # the app recomputes its totals on blur
+        except PWError as exc:
+            raise FillError(f"{row_name!r} would not accept {value!r}: "
+                            f"{str(exc)[:120]}")
+        return self._record(row_name, value, "number")
+
+    def grid_cell(self, label: str, value: str, column: int = 0,
+                  column_name: str = "") -> Entry:
+        """
+        Type a number into one cell of a two-table grid, found by its row name.
+
+        A read-only cell raises rather than being skipped quietly: on this
+        screen read-only means the application computes the figure, which is
+        something a report should say out loud rather than pass over.
+        """
+        assert_writable()
+        got = self.page.evaluate(self._GRID_JS, [label, column, True])
+        if not got or not got.get("ok"):
+            why = (got or {}).get("why", "the grid could not be read")
+            raise FillError(f"No grid row labelled {label!r} could be written "
+                            f"to: {why}.")
+        if got.get("readonly"):
+            raise FillError(
+                f"{label!r} column {column + 1} is read-only — the "
+                f"application computes it, so there is nothing to enter. It "
+                f"currently shows {got.get('value')!r}.")
+
+        ctl = self.page.locator('[data-crawl-cell="1"]').first
+        if not ctl.count():
+            raise FillError(f"{label!r} column {column + 1} could not be "
+                            f"located after being found in the grid.")
+        try:
+            ctl.click(timeout=6000)
+            ctl.fill("")
+            ctl.fill(str(value))
+            # Angular recomputes the totals on blur, and leaves the box
+            # untouched — so still invalid to Save — without it.
+            ctl.press("Tab")
+        except PWError as exc:
+            raise FillError(f"{label!r} column {column + 1} would not accept "
+                            f"{value!r}: {str(exc)[:120]}")
+        name = f"{label} — {column_name}" if column_name else \
+               f"{label} — column {column + 1}"
+        return self._record(name, value, "number")
+
+    # ---- Business Performance: one label table, many period blocks -------
+    #
+    # paired_grid above deliberately refuses this screen once a second period
+    # exists — it finds two input tables with the same row count as the label
+    # table and cannot tell which is meant, which is the right answer for a
+    # method whose job is "the grid". But Business Performance's '+ Add' makes
+    # exactly that shape on purpose: each period is its OWN table, sitting to
+    # the right of the last, sharing the one table of row names.
+    #
+    # Measured on the live screen after adding a period:
+    #     table 0   10 rows, no inputs          x=499   the row names
+    #     table 1   10 value rows, 2 inputs     x=667   the existing period
+    #     table 2   10 value rows, 2 inputs     x=963   the one just added
+    #
+    # So a block is addressed by INDEX in document order, which is also
+    # left-to-right on screen, and the period just added is the last one.
+
+    def paired_grid(self) -> dict:
+        """
+        The shape of a two-table grid: its row names, column names and cells.
+
+        Read-only, and the basis of everything else here — a caller uses it to
+        learn what the screen is actually showing rather than assuming the
+        specification's field list is what got rendered.
+        """
+        try:
+            got = self.page.evaluate(self._GRID_JS, ["", 0, False])
+        except PWError as exc:
+            return {"ok": False, "why": f"the grid could not be read: "
+                                        f"{str(exc)[:120]}"}
+        return got or {"ok": False, "why": "the grid could not be read"}
+
+    def paired_cell(self, label: str, column: int = 0) -> dict:
+        """One cell of a two-table grid: its value and whether it is writable."""
+        try:
+            got = self.page.evaluate(self._GRID_JS, [label, column, False])
+        except PWError as exc:
+            return {"ok": False, "why": str(exc)[:120]}
+        return got or {"ok": False, "why": "the grid could not be read"}
+
+    def paired_cell_value(self, label: str, column: int = 0) -> str:
+        """What the grid is showing for one metric, in one column."""
+        got = self.paired_cell(label, column)
+        return str(got.get("value") or "") if got.get("ok") else ""
+
+    def period_blocks(self) -> dict:
+        """
+        The row names, and one entry per period block on the screen.
+
+        Read-only. A caller uses it to learn how many periods the screen is
+        showing and which of them is the one just added.
+        """
+        try:
+            got = self.page.evaluate(self._BLOCK_JS, ["", 0, 0, False])
+        except PWError as exc:
+            return {"ok": False, "why": f"the grid could not be read: "
+                                        f"{str(exc)[:120]}"}
+        return got or {"ok": False, "why": "the grid could not be read"}
+
+    def block_cell(self, label: str, column: int = 0, block: int = 0) -> dict:
+        try:
+            got = self.page.evaluate(self._BLOCK_JS,
+                                     [label, column, block, False])
+        except PWError as exc:
+            return {"ok": False, "why": str(exc)[:120]}
+        return got or {"ok": False, "why": "the grid could not be read"}
+
+    def block_cell_value(self, label: str, column: int = 0,
+                         block: int = 0) -> str:
+        got = self.block_cell(label, column, block)
+        return str(got.get("value") or "") if got.get("ok") else ""
+
+    def set_block_cell(self, label: str, value: str, column: int = 0,
+                       block: int = 0, column_name: str = "") -> Entry:
+        """
+        Type a figure into one cell of one PERIOD of the grid.
+
+        The same contract as grid_cell, with the period made explicit: a
+        read-only cell raises rather than being skipped quietly, because
+        read-only here means the application computes the figure.
+        """
+        assert_writable(self.page.url)
+        got = self.page.evaluate(self._BLOCK_JS, [label, column, block, True])
+        if not got or not got.get("ok"):
+            why = (got or {}).get("why", "the grid could not be read")
+            raise FillError(f"No cell for {label!r} in period {block + 1}, "
+                            f"column {column + 1}: {why}.")
+        if got.get("readonly"):
+            raise FillError(
+                f"{label!r} column {column + 1} is read-only — the "
+                f"application computes it. It shows {got.get('value')!r}.")
+
+        ctl = self.page.locator('[data-crawl-cell="1"]').first
+        if not ctl.count():
+            raise FillError(f"{label!r} could not be located after being "
+                            f"found in the grid.")
+        try:
+            ctl.click(timeout=6000)
+            ctl.fill("")
+            ctl.fill(str(value))
+            ctl.press("Tab")       # the app recomputes its totals on blur
+        except PWError as exc:
+            raise FillError(f"{label!r} would not accept {value!r}: "
+                            f"{str(exc)[:120]}")
+        name = f"{label} — {column_name}" if column_name else \
+               f"{label} — column {column + 1}"
+        return self._record(name, value, "number")
+
+    # ---- long grids whose rows are named in their own first cell ---------
+    #
+    # Financials Input is 450-odd rows in ONE table: a first cell carrying a
+    # numbered name ('2.Cash & Marketable Securities'), then one input per
+    # statement column. Neither paired_grid nor period_blocks fits — the names
+    # are not a separate table, and the columns are not separate tables — so
+    # this addresses a cell as (row name, input index within that row).
+    #
+    # Rows with no input at all are section headings ('BALANCE SHEET') and are
+    # reported as such rather than skipped silently.
+
+    def commit_block(self, block: int = 0, label: str = "Save") -> str:
+        """
+        Press the Save that belongs to ONE period block.
+
+        Each period on Business Performance carries its own Save, side by side
+        under its own columns. commit() takes the first enabled match in
+        document order, which is the LEFTMOST — the period that was already
+        there — so saving a period this run added needs the right one by
+        position, not the first one that matches the word.
+
+        Saves are ordered by their x position and matched to blocks
+        left-to-right, which is the order period_blocks reports them in.
+        """
+        assert_writable(self.page.url)
+        if not _committable(label):
+            raise WriteRefused(
+                f"{label!r} is not a permitted commit control.")
+
+        try:
+            found = self.page.evaluate(
+                """(want) => {
+                    const txt = e => (e.value || e.textContent || '').trim();
+                    const vis = e => e.offsetParent !== null
+                                  || e.getClientRects().length;
+                    const norm = s => s.toLowerCase().replace(/\\s+/g, ' ').trim();
+                    const all = [...document.querySelectorAll(
+                        'button, a.btn, input[type=button], input[type=submit]')]
+                        .filter(vis)
+                        .filter(b => norm(txt(b)) === norm(want)
+                                     && !b.disabled);
+                    all.sort((a, b) => a.getBoundingClientRect().x
+                                     - b.getBoundingClientRect().x);
+                    all.forEach((b, i) => b.setAttribute('data-crawl-save',
+                                                         String(i)));
+                    return all.map((b, i) => ({i,
+                        x: Math.round(b.getBoundingClientRect().x)}));
+                }""", label) or []
+        except PWError as exc:
+            raise FillError(f"The {label!r} buttons could not be read: "
+                            f"{str(exc)[:120]}")
+
+        if not found:
+            raise FillError(f"No enabled {label!r} button is on this screen.")
+        which = block if 0 <= block < len(found) else len(found) - 1
+        btn = self.page.locator(f'[data-crawl-save="{which}"]').first
+        if not btn.count():
+            raise FillError(f"The {label!r} for period {block + 1} could not "
+                            f"be located after being found.")
+
+        self.session.recorder.clear()
+        try:
+            btn.scroll_into_view_if_needed(timeout=4000)
+        except PWError:
+            pass
+        try:
+            btn.click(timeout=10000)
+        except PWError as exc:
+            raise FillError(f"{label!r} would not click: {str(exc)[:140]}")
+        self._settle(25000)
+        self.page.wait_for_timeout(800)
+        return (f"clicked the {label} for period {which + 1} of "
+                f"{len(found)}")
+
+    def factor_rows(self) -> list[dict]:
+        """
+        Every PR factor on the screen, with its control's kind and state.
+
+        Read-only, and the basis of the whole flow: the sections are
+        configuration, so what is on the page is discovered rather than
+        declared.
+        """
+        try:
+            return self.page.evaluate(self._FACTOR_JS, ["", False]) or []
+        except PWError:
+            return []
+
+    def set_factor(self, factor: str, value: Optional[str] = None) -> Entry:
+        """
+        Set one factor's writable cell, found by the factor's own text.
+
+        Whichever column that cell is in — 'Factor Value' for most rows,
+        'Actual Value' for the two Linkage ones. `value=None` takes the first
+        real option of a dropdown, which is what the brief asks for on factors
+        it does not name; a text input with no value given is refused rather
+        than guessed at, because a number typed into a compliance calculation
+        is not a neutral default.
+
+        A row with nothing enabled raises FrozenField — not a failure, and the
+        caller records it as skipped.
+        """
+        assert_writable(self.page.url)
+        try:
+            rows = self.page.evaluate(self._FACTOR_JS, [factor, True]) or []
+        except PWError as exc:
+            raise FillError(f"The factor tables could not be read: "
+                            f"{str(exc)[:120]}")
+        match = next((r for r in rows if r.get("stamped")), None)
+        if match is None:
+            known = [r["factor"][:40] for r in rows][:6]
+            raise FillError(
+                f"No writable factor matching {factor!r}. "
+                + (f"On screen: {'; '.join(known)}" if known
+                   else "No factor tables are on this screen at all."))
+        if match.get("disabled"):
+            raise FrozenField(
+                f"{factor!r} is locked by the application — every control on "
+                f"that row is disabled, and it shows "
+                f"{match.get('value') or '(empty)'!r}.")
+
+        ctl = self.page.locator('[data-crawl-cell="1"]').first
+        if not ctl.count():
+            raise FillError(f"{factor!r} could not be located after being "
+                            f"found in the table.")
+
+        kind = match.get("kind")
+        column = match.get("writableColumn") or "its writable column"
+        if kind == "select":
+            real = [o for o in (match.get("options") or [])
+                    if o and not re.match(r"^-?\s*select\s*-?$|^--", o, re.I)]
+            if not real:
+                raise FillError(f"{factor!r} offers no selectable options.")
+            want = value if value in real else real[0]
+            try:
+                ctl.select_option(label=want)
+            except PWError as exc:
+                raise FillError(f"{factor!r} would not take {want!r}: "
+                                f"{str(exc)[:120]}")
+            kind_out = "dropdown"
+        elif kind == "ng-select":
+            want = self._choose_stamped(ctl, factor, value)
+            kind_out = "dropdown"
+        elif kind in ("input", "textarea"):
+            if value is None:
+                raise FillError(
+                    f"{factor!r} is a free-text {match.get('writableColumn')} "
+                    f"box, not a dropdown, and no value was given for it. "
+                    f"This one is not guessed at: the figure feeds the "
+                    f"application's own compliance arithmetic, so a made-up "
+                    f"default would produce a Compliant Status that means "
+                    f"nothing. Pin it in PR_FACTOR_VALUES.")
+            try:
+                ctl.click(timeout=6000)
+                ctl.fill("")
+                ctl.fill(str(value))
+                ctl.press("Tab")        # ASP.NET recalculates on blur
+            except PWError as exc:
+                raise FillError(f"{factor!r} would not take {value!r}: "
+                                f"{str(exc)[:120]}")
+            want = str(value)
+            kind_out = "text"
+        else:
+            raise FillError(
+                f"{factor!r} has a {kind!r} control in {column}, which this "
+                f"flow does not know how to set.")
+
+        self.page.wait_for_timeout(400)
+        return self._record(factor, want, kind_out)
