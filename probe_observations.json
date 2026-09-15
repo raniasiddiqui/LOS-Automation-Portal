@@ -1,0 +1,263 @@
+{
+  "labels": [
+    {
+      "tag": "label",
+      "cls": "filter-label mt-2 mb-1 pt-25",
+      "title": null,
+      "for": null,
+      "text": "Condition Type",
+      "parent": "div.sidebar-menu-list pl-0"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": "Title",
+      "for": "title",
+      "text": "Title",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Date of audit visit",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Region Response",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Date of audit",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Observation",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Complied",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Comments",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Report Date",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Cutoff Date",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Overall risk",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Type of Audit",
+      "parent": "fieldset.form-group"
+    },
+    {
+      "tag": "label",
+      "cls": "",
+      "title": null,
+      "for": null,
+      "text": "Recommendation by BRR",
+      "parent": "fieldset.form-group"
+    }
+  ],
+  "controls": [
+    {
+      "tag": "input",
+      "type": "text",
+      "id": "title",
+      "name": "",
+      "fcn": "",
+      "ph": "",
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "",
+      "id": "dateOfBrr",
+      "name": "",
+      "fcn": "",
+      "ph": "Select Date",
+      "disabled": false
+    },
+    {
+      "tag": "ng-select",
+      "type": "",
+      "id": "",
+      "name": "",
+      "fcn": "",
+      "ph": "- Select -",
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "text",
+      "id": "",
+      "name": "",
+      "fcn": "",
+      "ph": "",
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "",
+      "id": "dateOfAudit",
+      "name": "",
+      "fcn": "",
+      "ph": "Select Date",
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": "",
+      "id": "observation",
+      "name": "",
+      "fcn": "",
+      "ph": "",
+      "disabled": false
+    },
+    {
+      "tag": "ng-select",
+      "type": "",
+      "id": "",
+      "name": "",
+      "fcn": "",
+      "ph": "- Select -",
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "text",
+      "id": "",
+      "name": "",
+      "fcn": "",
+      "ph": "",
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": "",
+      "id": "comments",
+      "name": "",
+      "fcn": "",
+      "ph": "",
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "",
+      "id": "reportDate",
+      "name": "",
+      "fcn": "",
+      "ph": "Select Date",
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "",
+      "id": "cutoffDate",
+      "name": "",
+      "fcn": "",
+      "ph": "Select Date",
+      "disabled": false
+    },
+    {
+      "tag": "ng-select",
+      "type": "",
+      "id": "",
+      "name": "",
+      "fcn": "",
+      "ph": "- Select -",
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "text",
+      "id": "",
+      "name": "",
+      "fcn": "",
+      "ph": "",
+      "disabled": false
+    },
+    {
+      "tag": "ng-select",
+      "type": "",
+      "id": "",
+      "name": "",
+      "fcn": "",
+      "ph": "- Select -",
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "text",
+      "id": "",
+      "name": "",
+      "fcn": "",
+      "ph": "",
+      "disabled": false
+    },
+    {
+      "tag": "textarea",
+      "type": "",
+      "id": "recommendationbyBRR",
+      "name": "",
+      "fcn": "",
+      "ph": "",
+      "disabled": false
+    },
+    {
+      "tag": "input",
+      "type": "text",
+      "id": "todo-search",
+      "name": "",
+      "fcn": "",
+      "ph": "Search Conditions",
+      "disabled": false
+    }
+  ]
+}
