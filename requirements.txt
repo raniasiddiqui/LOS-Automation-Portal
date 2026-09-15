@@ -1,0 +1,11 @@
+playwright>=1.45.0
+scrapling>=0.2.0
+anthropic>=0.34.0
+openai>=1.40.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0
+# FSD ingestion (fsd_ingest.py)
+python-docx>=1.1.0
+pypdf>=4.0.0
